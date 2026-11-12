@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Frontline Defense — 2D Tower Defense</title>
+<style>
+:root{color-scheme:dark;--bg:#111923;--panel:#1b2733;--line:#344657;--accent:#d5a84f;--muted:#a8b6c3}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#edf2f5;font:14px system-ui,Segoe UI,sans-serif}
+header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px 16px;background:#0b1118;border-bottom:1px solid var(--line);flex-wrap:wrap}
+h1{font-size:18px;margin:0;letter-spacing:.08em}.stats{display:flex;gap:14px;flex-wrap:wrap}.stat b{color:var(--accent)}
+main{display:grid;grid-template-columns:minmax(0,1fr) 270px;gap:12px;padding:12px;max-width:1400px;margin:auto}
+#gameWrap{position:relative;min-width:0;background:#26352e;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+canvas{display:block;width:100%;height:auto;touch-action:manipulation}
+#overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:#071018bb;text-align:center;padding:20px}
+#overlay.show{display:flex}.modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:360px}
+aside{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;height:max-content}
+h2{font-size:15px;margin:0 0 10px}p{color:var(--muted);line-height:1.45;margin:8px 0}
+button{border:1px solid #536577;background:#293949;color:#f3f6f8;padding:9px 11px;border-radius:7px;cursor:pointer;font-weight:600}
+button:hover{border-color:var(--accent);background:#35485a}button:disabled{opacity:.4;cursor:not-allowed}
+.buttons{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:10px 0}
+button.selected{border-color:var(--accent);background:#51432b}
+.wide{width:100%;margin-top:7px}.small{font-size:12px;color:var(--muted)}
+#message{min-height:38px;color:#f0cb7b;margin-top:10px}
+hr{border:0;border-top:1px solid var(--line);margin:13px 0}
+@media(max-width:850px){main{grid-template-columns:1fr}aside{order:2}.buttons{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>FRONTLINE DEFENSE <span style="color:var(--accent)">2D</span></h1>
+  <div class="stats">
+    <span class="stat">Кредиты: <b id="money">220</b></span>
+    <span class="stat">База: <b id="hp">20</b></span>
+    <span class="stat">Волна: <b id="wave">0</b></span>
+    <span class="stat">Враги: <b id="enemies">0</b></span>
+  </div>
+</header>
+<main>
+<section id="gameWrap">
+ <canvas id="game" width="960" height="600" aria-label="Игровое поле"></canvas>
+ <div id="overlay"><div class="modal"><h2 id="overlayTitle">Игра окончена</h2><p id="overlayText"></p><button id="restart">Начать заново</button></div></div>
+</section>
+<aside>
+ <h2>Оборона</h2>
+ <p>Выбери сооружение, затем нажми на свободную площадку рядом с дорогой. Башни автоматически атакуют противников.</p>
+ <div class="buttons">
+  <button data-tower="gun">Пулемёт<br><span class="small">70 кредитов</span></button>
+  <button data-tower="cannon">Пушка<br><span class="small">115 кредитов</span></button>
+  <button data-tower="slow">Замедление<br><span class="small">90 кредитов</span></button>
+ </div>
+ <button class="wide" id="startWave">Начать волну</button>
+ <button class="wide" id="pause">Пауза</button>
+ <button class="wide" id="speed">Скорость: 1×</button>
+ <hr>
+ <h2>Выбранная башня</h2>
+ <div id="towerInfo" class="small">Нажми на установленную башню, чтобы посмотреть её параметры.</div>
+ <button class="wide" id="upgrade" disabled>Улучшить</button>
+ <button class="wide" id="sell" disabled>Продать</button>
+ <div id="message">Подготовь оборону и запусти первую волну.</div>
+ <hr>
+ <p class="small">Управление: мышь или касание. За уничтожение врагов начисляются кредиты. Если враги доберутся до базы, она потеряет прочность.</p>
+</aside>
+</main>
+<script>
+(()=>{
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const $=id=>document.getElementById(id);
+const path=[{x:-20,y:155},{x:210,y:155},{x:210,y:355},{x:475,y:355},{x:475,y:190},{x:735,y:190},{x:735,y:455},{x:980,y:455}];
+const spots=[{x:115,y:245},{x:300,y:105},{x:315,y:435},{x:555,y:285},{x:625,y:105},{x:820,y:290},{x:850,y:525},{x:90,y:430},{x:390,y:260},{x:660,y:520}];
+const types={
+ gun:{name:'Пулемёт',cost:70,range:145,damage:12,rate:.42,color:'#e5bd63',upgrade:55},
+ cannon:{name:'Пушка',cost:115,range:190,damage:38,rate:1.25,color:'#e27e58',upgrade:85},
+ slow:{name:'Замедлитель',cost:90,range:135,damage:3,rate:.7,color:'#70c9d4',upgrade:70}
+};
+let money=220,base=20,wave=0,enemies=[],towers=[],bullets=[],selected=null,buildType='gun';
+let running=false,paused=false,gameOver=false,spawnLeft=0,spawnTimer=0,between=0,speed=1,last=0,elapsed=0;
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+function setMsg(s){$('message').textContent=s}
+function updateUI(){
+ $('money').textContent=money;$('hp').textContent=base;$('wave').textContent=wave;$('enemies').textContent=enemies.length+(spawnLeft>0?spawnLeft:0);
+ document.querySelectorAll('[data-tower]').forEach(b=>b.classList.toggle('selected',b.dataset.tower===buildType));
+ const ok=selected!==null&&towers.includes(selected);
+ $('upgrade').disabled=!ok||money<selected?.upgradeCost;
+ $('sell').disabled=!ok;
+ if(ok){$('towerInfo').innerHTML=`<b>${types[selected.type].name}</b><br>Уровень: ${selected.level}<br>Урон: ${Math.round(selected.damage)}<br>Радиус: ${selected.range}<br>Следующее улучшение: ${selected.upgradeCost} кредитов`;}
+ else $('towerInfo').textContent='Нажми на установленную башню, чтобы посмотреть её параметры.';
+}
+function pointAt(x,y){let best=0;for(let i=1;i<path.length;i++){let a=path[i-1],b=path[i],dx=b.x-a.x,dy=b.y-a.y,t=Math.max(0,Math.min(1,((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy)));best=Math.max(best,dist({x,y},{x:a.x+t*dx,y:a.y+t*dy}));}return best;}
+function draw(){
+ ctx.clearRect(0,0,960,600);
+ // terrain
+ ctx.fillStyle='#34483b';ctx.fillRect(0,0,960,600);
+ for(let i=0;i<90;i++){let x=(i*137)%960,y=(i*83)%600;if(pointAt(x,y)>48){ctx.fillStyle=i%3?'#405744':'#4b6248';ctx.beginPath();ctx.arc(x,y,5+(i%5),0,Math.PI*2);ctx.fill();ctx.fillStyle='#263a2e';ctx.beginPath();ctx.arc(x+2,y+3,3+(i%4),0,Math.PI*2);ctx.fill();}}
+ // road
+ ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle='#776f5d';ctx.lineWidth=78;ctx.beginPath();path.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.stroke();
+ ctx.strokeStyle='#9b9078';ctx.lineWidth=2;ctx.setLineDash([14,17]);ctx.beginPath();path.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.stroke();ctx.setLineDash([]);
+ // base
+ ctx.fillStyle='#273744';ctx.fillRect(875,405,66,95);ctx.fillStyle='#d2b36a';ctx.fillRect(889,420,38,65);ctx.fillStyle='#e9e0c9';ctx.font='bold 13px sans-serif';ctx.fillText('БАЗА',887,398);
+ // build spots
+ spots.forEach(s=>{ctx.strokeStyle='#c3c9ad88';ctx.lineWidth=2;ctx.beginPath();ctx.arc(s.x,s.y,19,0,Math.PI*2);ctx.stroke();});
+ // tower ranges and towers
+ towers.forEach(t=>{
+  if(t===selected){ctx.fillStyle='#ffffff12';ctx.beginPath();ctx.arc(t.x,t.y,t.range,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#e8d18b88';ctx.stroke();}
+  ctx.fillStyle='#18232b';ctx.beginPath();ctx.arc(t.x,t.y,18,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=types[t.type].color;ctx.beginPath();ctx.arc(t.x,t.y,13,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='#18232b';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(t.x,t.y);ctx.lineTo(t.x+Math.cos(t.angle)*19,t.y+Math.sin(t.angle)*19);ctx.stroke();
+  ctx.fillStyle='#f1e8cf';ctx.font='11px sans-serif';ctx.fillText('У'+t.level,t.x-8,t.y+31);
+ });
+ // enemies
+ enemies.forEach(e=>{
+  ctx.fillStyle=e.slow>0?'#8bdde5':'#bd6254';ctx.beginPath();ctx.arc(e.x,e.y,e.r,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#202020';ctx.fillRect(e.x-15,e.y-e.r-9,30,4);ctx.fillStyle='#83c978';ctx.fillRect(e.x-15,e.y-e.r-9,30*Math.max(0,e.hp/e.maxHp),4);
+  ctx.fillStyle='#211e1b';ctx.beginPath();ctx.arc(e.x-4,e.y-2,2,0,7);ctx.arc(e.x+4,e.y-2,2,0,7);ctx.fill();
+ });
+ bullets.forEach(b=>{ctx.fillStyle=b.color;ctx.beginPath();ctx.arc(b.x,b.y,4,0,7);ctx.fill();});
+ if(!running&&!gameOver){ctx.fillStyle='#fff';ctx.font='bold 19px sans-serif';ctx.fillText('ЗОНА ОБОРОНЫ',22,34);}
+}
+function makeEnemy(){
+ const armor=wave%5===0;const hp=55+wave*17+(armor?100:0);
+ enemies.push({x:path[0].x,y:path[0].y,segment:0,progress:0,hp,maxHp:hp,speed:(armor?43:57)+Math.min(wave,15)*1.7,r:armor?15:11,reward:armor?28:12,slow:0,armor});
+}
+function startWave(){
+ if(gameOver||running)return;
+ wave++;spawnLeft=7+wave*2;spawnTimer=0;running=true;between=0;setMsg(`Волна ${wave}: противник приближается!`);updateUI();
+}
+function upgrade(){
+ if(!selected||money<selected.upgradeCost)return;
+ money-=selected.upgradeCost;selected.level++;selected.damage*=1.55;selected.range+=12;selected.rate*=.88;selected.upgradeCost=Math.round(selected.upgradeCost*1.65);updateUI();setMsg('Башня модернизирована.');
+}
+function sell(){
+ if(!selected)return;money+=Math.round(types[selected.type].cost*.55+selected.level*20);towers=towers.filter(t=>t!==selected);selected=null;updateUI();setMsg('Башня продана.');
+}
+function moveEnemy(e,dt){
+ let remaining=e.speed*(e.slow>0?.48:1)*dt;
+ e.slow=Math.max(0,e.slow-dt);
+ while(remaining>0&&e.segment<path.length-1){
+  const target=path[e.segment+1],d=dist(e,target);
+  if(d<=remaining){e.x=target.x;e.y=target.y;remaining-=d;e.segment++;}
+  else{e.x+=(target.x-e.x)/d*remaining;e.y+=(target.y-e.y)/d*remaining;remaining=0;}
+ }
+ if(e.segment>=path.length-1){base--;return true;}return false;
+}
+function update(dt){
+ if(!running||paused||gameOver)return;
+ elapsed+=dt;
+ if(spawnLeft>0){spawnTimer-=dt;if(spawnTimer<=0){makeEnemy();spawnLeft--;spawnTimer=Math.max(.42,1.05-wave*.018);}}
+ enemies=enemies.filter(e=>!moveEnemy(e,dt));
+ towers.forEach(t=>{
+  t.cooldown-=dt;
+  let target=null,best=-1;
+  enemies.forEach(e=>{let d=dist(t,e);if(d<=t.range&&e.segment*1000+e.progress>best){best=e.segment*1000+e.progress;target=e;}});
+  if(target){t.angle=Math.atan2(target.y-t.y,target.x-t.x);if(t.cooldown<=0){bullets.push({x:t.x+Math.cos(t.angle)*18,y:t.y+Math.sin(t.angle)*18,target,damage:t.damage,type:t.type,color:types[t.type].color,speed:t.type==='cannon'?390:470});t.cooldown=t.rate;}}
+ });
+ bullets=bullets.filter(b=>{
+  if(!enemies.includes(b.target))return false;
+  let d=dist(b,b.target),step=b.speed*dt;
+  if(d<=step+ b.target.r){b.target.hp-=b.damage;if(b.type==='slow')b.target.slow=1.7;if(b.target.hp<=0){money+=b.target.reward;enemies=enemies.filter(e=>e!==b.target);}return false;}
+  b.x+=(b.target.x-b.x)/d*step;b.y+=(b.target.y-b.y)/d*step;return true;
+ });
+ if(base<=0){base=0;gameOver=true;running=false;$('overlayTitle').textContent='База потеряна';$('overlayText').textContent=`Ты продержался до волны ${wave}. Попробуй изменить расположение и состав обороны.`;$('overlay').classList.add('show');}
+ if(running&&spawnLeft===0&&enemies.length===0){running=false;money+=35+wave*5;setMsg(`Волна ${wave} отражена! Бонус: ${35+wave*5} кредитов.`);}
+ updateUI();
+}
+function frame(ts){let dt=Math.min(.04,(ts-last)/1000||0);last=ts;update(dt*speed);draw();requestAnimationFrame(frame);}
+canvas.addEventListener('pointerdown',ev=>{
+ const r=canvas.getBoundingClientRect(),x=(ev.clientX-r.left)*960/r.width,y=(ev.clientY-r.top)*600/r.height;
+ let hit=[...towers].reverse().find(t=>dist(t,{x,y})<22);
+ if(hit){selected=hit;updateUI();return;}
+ selected=null;
+ if(!running&&!gameOver){
+  const spot=spots.find(s=>dist(s,{x,y})<23);
+  if(spot&&!towers.some(t=>dist(t,spot)<28)){
+   let type=types[buildType];if(money>=type.cost){money-=type.cost;towers.push({x:spot.x,y:spot.y,type:buildType,level:1,damage:type.damage,range:type.range,rate:type.rate,cooldown:.2,angle:-Math.PI/2,upgradeCost:type.upgrade});setMsg(`${type.name} построена.`);}else setMsg('Недостаточно кредитов.');
+  }else if(spot)setMsg('Это место уже занято.');
+ }
+ updateUI();
+});
+document.querySelectorAll('[data-tower]').forEach(b=>b.onclick=()=>{buildType=b.dataset.tower;selected=null;updateUI();});
+$('startWave').onclick=startWave;$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'Продолжить':'Пауза';};
+$('speed').onclick=()=>{speed=speed===1?2:speed===2?3:1;$('speed').textContent=`Скорость: ${speed}×`;};
+$('upgrade').onclick=upgrade;$('sell').onclick=sell;
+function reset(){money=220;base=20;wave=0;enemies=[];towers=[];bullets=[];selected=null;running=false;paused=false;gameOver=false;spawnLeft=0;speed=1;$('overlay').classList.remove('show');$('pause').textContent='Пауза';$('speed').textContent='Скорость: 1×';setMsg('Подготовь оборону и запусти первую волну.');updateUI();}
+$('restart').onclick=reset;updateUI();requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
